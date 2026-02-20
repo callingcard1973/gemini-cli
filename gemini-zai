@@ -1,0 +1,13 @@
+#!/bin/bash
+# Gemini CLI with z.ai support
+# Unset Google keys to force OpenRouter
+unset GOOGLE_API_KEY GOOGLE_API_KEY_2 GOOGLE_API_KEY_3 GEMINI_API_KEY
+export OPENROUTER_BASE_URL="https://api.z.ai/api/coding/paas/v4"
+export OPENROUTER_API_KEY="44ef6149ab574ed69bcbac1a5b3a9c60.iFsnoROjj4FZvI4c"
+
+# Default to GLM-4.5 if no model specified
+if [[ ! "$*" =~ "-m " ]] && [[ ! "$*" =~ "--model " ]]; then
+    exec node /home/tudor/gemini-cli/bundle/gemini.js -m glm-4.5 "$@"
+else
+    exec node /home/tudor/gemini-cli/bundle/gemini.js "$@"
+fi

@@ -19,8 +19,14 @@ import { getEffectiveModel } from './modelCheck.js';
 
 /**
  * Maps Gemini model names to OpenRouter model IDs
+ * Passes through GLM models and other non-Gemini models directly
  */
 function mapGeminiModelToOpenRouter(model: string): string {
+  // Pass through GLM models (z.ai) and models with provider prefix directly
+  if (model.startsWith('glm-') || model.includes('/')) {
+    return model;
+  }
+
   const modelMap: Record<string, string> = {
     'gemini-2.5-pro': 'google/gemini-2.5-pro',
     'gemini-2.5-flash': 'google/gemini-2.5-flash',
