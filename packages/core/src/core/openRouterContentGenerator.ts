@@ -96,7 +96,6 @@ export function createOpenRouterContentGenerator(
               ? { type: 'json_object' }
               : undefined,
           stream: false,
-          stream_options: { include_usage: true },
         });
 
         return convertToGeminiResponse(
@@ -206,74 +205,90 @@ function convertToOpenAIFormat(
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const contents = normalizeContents(request.contents);
 
-  return contents
-    .map((content: Content) => {
-      const role =
-        content.role === 'model' ? 'assistant' : (content.role as string);
-      const parts = content.parts || [];
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
-      // Handle single text part
-      if (parts.length === 1 && parts[0] && 'text' in parts[0]) {
-        return {
-          role: role as 'user' | 'assistant',
-          content: parts[0].text || '',
-        };
+  for (const content of contents) {
+    const role =
+      content.role === 'model' ? 'assistant' : (content.role as string);
+    const parts = content.parts || [];
+
+    // Handle function responses first (regardless of role - Gemini uses various roles)
+    const functionResponses = parts.filter(
+      (part: Part) => part && 'functionResponse' in part,
+    );
+
+    if (functionResponses.length > 0) {
+      for (const part of functionResponses) {
+        const funcResp = part.functionResponse;
+        if (funcResp) {
+          messages.push({
+            role: 'tool' as const,
+            tool_call_id: funcResp.id || funcResp.name || 'unknown',
+            content: typeof funcResp.response === 'string'
+              ? funcResp.response
+              : JSON.stringify(funcResp.response || {}),
+          });
+        }
       }
+      continue; // Function responses are handled, skip other processing
+    }
 
-      // Handle function calls
-      const functionCalls = parts.filter(
-        (part: Part) => part && 'functionCall' in part,
-      );
+    // Handle function calls from assistant
+    const functionCalls = parts.filter(
+      (part: Part) => part && 'functionCall' in part,
+    );
 
-      if (functionCalls.length > 0 && role === 'assistant') {
-        const toolCalls = functionCalls
-          .map((part: Part, index: number) => {
-            const functionCall = part.functionCall;
-            if (!functionCall) return null;
+    // Get text parts
+    const textParts = parts.filter((part: Part) => part && 'text' in part);
+    const text = textParts
+      .map((part: Part) => ('text' in part ? part.text || '' : ''))
+      .join('\n')
+      .trim();
 
-            return {
-              id: functionCall.id || `call_${index}`,
-              type: 'function' as const,
-              function: {
-                name: functionCall.name || '',
-                arguments: JSON.stringify(functionCall.args || {}),
-              },
-            };
-          })
-          .filter(Boolean);
+    if (functionCalls.length > 0 && role === 'assistant') {
+      // Assistant message with tool calls
+      const toolCalls = functionCalls
+        .map((part: Part, index: number) => {
+          const functionCall = part.functionCall;
+          if (!functionCall) return null;
 
-        return {
-          role: 'assistant' as const,
-          content: null,
-          tool_calls: toolCalls as OpenAI.Chat.ChatCompletionMessageToolCall[],
-        };
-      }
+          return {
+            id: functionCall.id || `call_${index}`,
+            type: 'function' as const,
+            function: {
+              name: functionCall.name || '',
+              arguments: JSON.stringify(functionCall.args || {}),
+            },
+          };
+        })
+        .filter(Boolean) as OpenAI.Chat.ChatCompletionMessageToolCall[];
 
-      // Handle function responses
-      const functionResponses = parts.filter(
-        (part: Part) => part && 'functionResponse' in part,
-      );
+      // Include text content if present, otherwise null
+      messages.push({
+        role: 'assistant' as const,
+        content: text || null,
+        tool_calls: toolCalls,
+      });
+      continue;
+    }
 
-      if (functionResponses.length > 0 && role === 'function') {
-        return functionResponses.map((part: Part, index: number) => ({
-          role: 'tool' as const,
-          tool_call_id: part.functionResponse?.name || `call_${index}`,
-          content: JSON.stringify(part.functionResponse?.response || {}),
-        }));
-      }
+    // Regular text message - skip empty ones
+    if (!text && parts.length === 0) {
+      continue;
+    }
 
-      // Handle text parts
-      const textParts = parts.filter((part: Part) => part && 'text' in part);
-      const text = textParts
-        .map((part: Part) => ('text' in part ? part.text || '' : ''))
-        .join('\n');
+    // Skip empty assistant messages
+    if (role === 'assistant' && !text) {
+      continue;
+    }
 
-      return {
-        role: (role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-        content: text,
-      };
-    })
-    .flat();
+    messages.push({
+      role: (role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: text || '',
+    });
+  }
+
+  return messages;
 }
 
 import type { ToolListUnion, Tool as GenaiTool } from '@google/genai';
@@ -321,6 +336,7 @@ function convertToGeminiResponse(
       if (toolCall.function) {
         parts.push({
           functionCall: {
+            id: toolCall.id,
             name: toolCall.function.name,
             args: JSON.parse(toolCall.function.arguments),
           },
@@ -375,14 +391,19 @@ function convertChunkToGeminiResponse(
   if (delta?.tool_calls) {
     for (const toolCall of delta.tool_calls) {
       if (toolCall.function) {
-        parts.push({
-          functionCall: {
-            name: toolCall.function.name,
-            args: toolCall.function.arguments
-              ? JSON.parse(toolCall.function.arguments)
-              : {},
-          },
-        });
+        // Only parse complete tool calls that have a name
+        // Streaming may send partial function calls that need accumulation
+        if (toolCall.function.name) {
+          parts.push({
+            functionCall: {
+              id: toolCall.id,
+              name: toolCall.function.name,
+              args: toolCall.function.arguments
+                ? JSON.parse(toolCall.function.arguments)
+                : {},
+            },
+          });
+        }
       }
     }
   }
